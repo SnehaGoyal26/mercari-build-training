@@ -1,48 +1,32 @@
 import os
 import logging
 import pathlib
-from fastapi import FastAPI, Form, HTTPException, Depends
+import json
+import hashlib
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Path
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
-import sqlite3
 from pydantic import BaseModel
 from contextlib import asynccontextmanager
 
+# Define paths
+BASE_DIR = pathlib.Path(__file__).parent.resolve()
+IMAGES_DIR = BASE_DIR / "images"
+DB_PATH = BASE_DIR / "db" / "mercari.sqlite3"
+ITEMS_JSON = BASE_DIR / "items.json"
 
-# Define the path to the images & sqlite3 database
-images = pathlib.Path(__file__).parent.resolve() / "images"
-db = pathlib.Path(__file__).parent.resolve() / "db" / "mercari.sqlite3"
+# Ensure directories exist
+IMAGES_DIR.mkdir(exist_ok=True)
+DB_PATH.parent.mkdir(exist_ok=True)
 
-
-def get_db():
-    if not db.exists():
-        yield
-
-    conn = sqlite3.connect(db)
-    conn.row_factory = sqlite3.Row  # Return rows as dictionaries
-    try:
-        yield conn
-    finally:
-        conn.close()
-
-
-# STEP 5-1: set up the database connection
-def setup_database():
-    pass
-
-
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    setup_database()
-    yield
-
-
-app = FastAPI(lifespan=lifespan)
-
+# Setup logger
 logger = logging.getLogger("uvicorn")
-logger.level = logging.INFO
-images = pathlib.Path(__file__).parent.resolve() / "images"
+logger.setLevel(logging.INFO)
+
+# CORS Middleware
 origins = [os.environ.get("FRONT_URL", "http://localhost:3000")]
+app = FastAPI()
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -51,53 +35,82 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+class Item(BaseModel):
+    name: str
+    category: str
+    image_name: str = None 
 
 class HelloResponse(BaseModel):
     message: str
 
-
 @app.get("/", response_model=HelloResponse)
 def hello():
-    return HelloResponse(**{"message": "Hello, world!"})
+    return {"message": "Hello, world!"}
 
 
-class AddItemResponse(BaseModel):
-    message: str
+# Read Items
+def read_items():
+    if not ITEMS_JSON.exists()or ITEMS_JSON.stat().st_size == 0:
+        return {"items": []}
+    with open(ITEMS_JSON, "r") as file:
+        try:
+            return json.load(file)
+        except json.JSONDecodeError:
+            return {"items": []}
+
+# Save Items
+def save_items(data):
+    with open(ITEMS_JSON, "w") as file:
+        json.dump(data, file, indent=4)
 
 
-# add_item is a handler to add a new item for POST /items .
-@app.post("/items", response_model=AddItemResponse)
-def add_item(
+@app.post("/items")
+async def add_item(
     name: str = Form(...),
-    db: sqlite3.Connection = Depends(get_db),
+    category: str = Form(...),
+    image: UploadFile = File(...)
 ):
-    if not name:
-        raise HTTPException(status_code=400, detail="name is required")
+    data = read_items()
 
-    insert_item(Item(name=name))
-    return AddItemResponse(**{"message": f"item received: {name}"})
+    # Hash Image Name
+    image_bytes = await image.read()
+    image_hash = hashlib.sha256(image_bytes).hexdigest()
+    image_filename = f"{image_hash}.jpg"
 
+    # Save Image
+    image_path = IMAGES_DIR / image_filename
+    with open(image_path, "wb") as img_file:
+        img_file.write(image_bytes)
 
-# get_image is a handler to return an image for GET /images/{filename} .
+    # Add Item
+    new_item = {"name": name, "category": category, "image_name": image_filename}
+    data["items"].append(new_item)
+    save_items(data)
+
+    return {"message": "Item added successfully!", "item": new_item}
+
+@app.get("/items")
+def get_items():
+    return read_items()
+
+@app.get("/items/{item_id}")
+def get_item(item_id: int = Path(..., description="The ID of the item (1-based index)")):
+    data = read_items()
+
+    if item_id < 1 or item_id > len(data["items"]):
+        raise HTTPException(status_code=404, detail="Item not found")
+
+    return data["items"][item_id - 1]
+
 @app.get("/images/{image_name}")
-async def get_image(image_name):
-    # Create image path
-    image = images / image_name
+async def get_image(image_name: str):
+    image_path = IMAGES_DIR / image_name
 
     if not image_name.endswith(".jpg"):
-        raise HTTPException(status_code=400, detail="Image path does not end with .jpg")
+        raise HTTPException(status_code=400, detail="Only .jpg images are supported.")
 
-    if not image.exists():
-        logger.debug(f"Image not found: {image}")
-        image = images / "default.jpg"
+    if not image_path.exists():
+        logger.debug(f"Image not found: {image_path}")
+        return FileResponse(IMAGES_DIR / "default.jpg")
 
-    return FileResponse(image)
-
-
-class Item(BaseModel):
-    name: str
-
-
-def insert_item(item: Item):
-    # STEP 4-2: add an implementation to store an item
-    pass
+    return FileResponse(image_path)
