@@ -10,9 +10,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Database Configuration
-DB_FILE = pathlib.Path("C:/Users/91902/Desktop/build training/mercari-build-training/python/db/mercari.sqlite3")
-
-IMAGE_DIR = pathlib.Path(__file__).parent / "images"
+BASE_DIR = pathlib.Path(__file__).parent
+DB_FILE = BASE_DIR / "db" / "mercari.sqlite3"
+IMAGE_DIR = BASE_DIR / "images"
 IMAGE_DIR.mkdir(exist_ok=True)
 
 # Logging Configuration
@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 
 # FastAPI Initialization
 app = FastAPI()
-origins = [os.environ.get("FRONT_URL", "http://localhost:3000")]
+origins = [os.getenv("FRONT_URL", "http://localhost:3000")]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -32,12 +32,43 @@ app.add_middleware(
 
 # Database Dependency
 def get_db():
-    conn = sqlite3.connect(DB_FILE)
+    """Returns a database connection."""
+    conn = sqlite3.connect(DB_FILE, check_same_thread=False)  # Allow access from multiple threads
     conn.row_factory = sqlite3.Row
     try:
         yield conn
     finally:
         conn.close()
+
+# Database Initialization Function
+def initialize_db():
+    """Ensure the database and tables exist."""
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+
+    # Create tables if not exists
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS categories (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL
+        )
+    """)
+    
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            category_id INTEGER NOT NULL,
+            image_name TEXT,
+            FOREIGN KEY (category_id) REFERENCES categories(id)
+        )
+    """)
+
+    conn.commit()
+    conn.close()
+
+# Call the DB initialization on app startup
+initialize_db()
 
 # Item Schema
 class Item(BaseModel):
@@ -48,25 +79,27 @@ class Item(BaseModel):
 # Insert Item into Database
 def insert_item(item: Item, image_name: str, db: sqlite3.Connection):
     cursor = db.cursor()
-    
-    cursor.execute("SELECT id FROM categories WHERE name = ?", (item.category,))
-    category = cursor.fetchone()
-    
-    if category is None:
-        cursor.execute("INSERT INTO categories (name) VALUES (?)", (item.category,))
-        category_id = cursor.lastrowid
-    else:
-        category_id = category["id"]
 
+    # Insert category if not exists
+    cursor.execute("INSERT OR IGNORE INTO categories (name) VALUES (?)", (item.category,))
+    cursor.execute("SELECT id FROM categories WHERE name = ?", (item.category,))
+    category_id = cursor.fetchone()["id"]
+
+    # Insert item
     cursor.execute(
         "INSERT INTO items (name, category_id, image_name) VALUES (?, ?, ?)",
         (item.name, category_id, image_name),
     )
     db.commit()
 
+# Validate Image Type
+def validate_image_type(image: UploadFile):
+    if not image.filename.lower().endswith((".jpg", ".jpeg", ".png")):
+        raise HTTPException(status_code=400, detail="Only JPG, JPEG, or PNG images are allowed.")
+
 # Add Item Endpoint
 @app.post("/items")
-def add_item(
+async def add_item(
     name: str = Form(...),
     category: str = Form(...),
     image: UploadFile = File(None),
@@ -77,18 +110,19 @@ def add_item(
 
     image_name = None
     if image:
-        image_bytes = image.file.read()
+        validate_image_type(image)
+        image_bytes = await image.read()
         image_hash = hashlib.sha256(image_bytes).hexdigest()
         image_name = f"{image_hash}.jpg"
         with open(IMAGE_DIR / image_name, "wb") as f:
             f.write(image_bytes)
 
     insert_item(Item(name=name, category=category), image_name, db)
-    return {"message": f"Item received: {name}"}
+    return {"message": f"Item added: {name}"}
 
 # Get All Items
 @app.get("/items")
-def get_items(db: sqlite3.Connection = Depends(get_db)):
+async def get_items(db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute(
         """
@@ -98,11 +132,12 @@ def get_items(db: sqlite3.Connection = Depends(get_db)):
         """
     )
     items = cursor.fetchall()
+    logger.debug(f"Fetched items: {items}")
     return {"items": [dict(item) for item in items]}
 
 # Get Specific Item
 @app.get("/items/{item_id}")
-def get_item(item_id: int, db: sqlite3.Connection = Depends(get_db)):
+async def get_item(item_id: int, db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute(
         """
@@ -111,7 +146,7 @@ def get_item(item_id: int, db: sqlite3.Connection = Depends(get_db)):
         JOIN categories ON items.category_id = categories.id
         WHERE items.id = ?
         """,
-        (item_id,)
+        (item_id,),
     )
     item = cursor.fetchone()
 
@@ -121,7 +156,7 @@ def get_item(item_id: int, db: sqlite3.Connection = Depends(get_db)):
 
 # Search Items
 @app.get("/search")
-def search_items(keyword: str = Query(..., description="Keyword to search for items"), db: sqlite3.Connection = Depends(get_db)):
+async def search_items(keyword: str = Query(..., description="Keyword to search for items"), db: sqlite3.Connection = Depends(get_db)):
     cursor = db.cursor()
     cursor.execute(
         """
@@ -133,6 +168,7 @@ def search_items(keyword: str = Query(..., description="Keyword to search for it
         (f"%{keyword}%", f"%{keyword}%"),
     )
     items = cursor.fetchall()
+    logger.debug(f"Search results: {items}")
     return {"items": [dict(item) for item in items]}
 
 # Get Image
@@ -148,4 +184,3 @@ async def get_image(image_name: str):
 @app.get("/")
 def read_root():
     return {"message": "Hello, world!"}
-

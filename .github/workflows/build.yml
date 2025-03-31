@@ -1,5 +1,6 @@
 name: build
 run-name: ${{ github.actor }} is building ${{ github.ref_name }} 🚀
+
 on: [push]
 
 env:
@@ -35,18 +36,11 @@ jobs:
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
 
-      - name: Check variables
-        run: |
-          echo 'Current path:'
-          pwd
-          echo 'Tag: ${{ steps.meta.outputs.tags }}'
-          echo 'Label: ${{ steps.meta.outputs.labels }}'
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v5
         with:
-          context: ./python # Change this path if needed
-          platforms: linux/amd64,linux/arm64 # Optional for multi-platform
+          context: ./python # Ensure this points to the correct folder with Dockerfile and FastAPI code
+          platforms: linux/amd64,linux/arm64 # Optional - multi-platform builds
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
