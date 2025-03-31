@@ -10,7 +10,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 # Database Configuration
-DB_FILE = pathlib.Path(__file__).parent / "db" / "mercari.sqlite3"
+DB_FILE = pathlib.Path("C:/Users/91902/Desktop/build training/mercari-build-training/python/db/mercari.sqlite3")
+
 IMAGE_DIR = pathlib.Path(__file__).parent / "images"
 IMAGE_DIR.mkdir(exist_ok=True)
 
